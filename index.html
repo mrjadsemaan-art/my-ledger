@@ -139,6 +139,9 @@ h1,h2,h3{margin:0;font-weight:600;text-wrap:balance}
 .cur-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;margin-bottom:12px}
 .cur-title .badge{width:30px;height:30px;border-radius:10px;font-size:12px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(100px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:60;max-width:90%}
+.eq{display:block;font-size:11.5px;font-weight:500;color:var(--muted);margin-top:1px}
+.card .eqc{font-size:15px;opacity:.85;margin:-6px 0 12px}
+.amt{text-align:end}
 .warn{background:color-mix(in srgb,var(--out) 14%,var(--surface));border:1.5px solid var(--out);border-radius:16px;padding:12px 14px;font-size:14px;line-height:1.7}
 .warn b{color:var(--out)}
 .okline{color:var(--in);font-weight:600}
@@ -188,6 +191,10 @@ var CURS=["USD","LBP"];
 var txs=[];            // {id,kind:'in'|'out',cur,amount,name,date,ts}
 var ui={tab:"home",logCur:"ALL",logKind:"ALL",repMode:"day",repDay:todayStr(),repMonth:todayStr().slice(0,7),mode:"local"};
 var health={ls:false,db:"pending"};
+var DEFAULT_RATE=89500;
+var rate=DEFAULT_RATE;
+try{var rr=parseFloat(localStorage.getItem("hesabati.rate"));if(isFinite(rr)&&rr>0)rate=rr}catch(e){}
+function eqUsd(n){var u=n/rate;return (u<0?"-":"")+"$"+numStr("USD",u)}
 var col=null;          // db collection when available
 
 function readLocal(){try{var r=localStorage.getItem(LSKEY);return r?JSON.parse(r):[]}catch(e){return []}}
@@ -211,6 +218,9 @@ function relDay(s){
   var t=todayStr();if(s===t)return"Today";
   var y=new Date();y.setDate(y.getDate()-1);if(s===ymd(y))return"Yesterday";
   return dayLabel(s);
+}
+function mv(cur,n,sign){
+  return money(cur,n,sign)+(cur==="LBP"&&n!==0?'<span class="eq">≈ '+eqUsd(n)+'</span>':"");
 }
 function parseNum(v){
   v=String(v).replace(/[٠-٩]/g,function(d){return "٠١٢٣٤٥٦٧٨٩".indexOf(d)}).replace(/[٫]/g,".").replace(/[٬,\s]/g,"");
@@ -240,7 +250,7 @@ function txRow(t){
   var c=CUR[t.cur];
   return '<button class="row" data-edit="'+esc(t.id)+'"><span class="badge '+c.cls+'">'+c.short+'</span>'+
     '<span class="mid"><div class="nm">'+esc(t.name)+'</div><div class="mt">'+(t.kind==="in"?"Income":"Expense")+" · "+relDay(t.date)+'</div></span>'+
-    '<span class="amt '+(t.kind==="in"?"in":"out")+'">'+money(t.cur,t.kind==="in"?t.amount:-t.amount,true)+'</span></button>';
+    '<span class="amt '+(t.kind==="in"?"in":"out")+'">'+mv(t.cur,t.kind==="in"?t.amount:-t.amount,true)+'</span></button>';
 }
 function miniBlock(cur,list){
   var tt=totals(list,cur);
@@ -255,10 +265,14 @@ function viewHome(){
   CURS.forEach(function(cur){
     var all=totals(txs,cur),mm=totals(mt,cur);
     h+='<section class="card '+CUR[cur].cls+'"><div class="cap">Balance · '+CUR[cur].label+'</div>'+
-      '<div class="big">'+money(cur,all.net)+'</div>'+
+      '<div class="big">'+money(cur,all.net)+'</div>'+(cur==="LBP"?'<div class="eqc">≈ '+eqUsd(all.net)+' at $1 = '+numStr("LBP",rate)+' LBP</div>':"")+
       '<div class="sub"><div>Income · '+MONTHS[now.getMonth()]+'<b>'+money(cur,mm.in)+'</b></div><div>Expenses · '+MONTHS[now.getMonth()]+'<b>'+money(cur,mm.out)+'</b></div></div></section>';
   });
   h+='<section class="panel"><h3>Today<small>'+dayLabel(todayStr())+'</small></h3><div class="cols">'+miniBlock("USD",td)+miniBlock("LBP",td)+'</div></section>';
+  var totUsd=totals(txs,"USD").net+totals(txs,"LBP").net/rate;
+  h+='<section class="panel"><h3>Exchange rate<button class="link" id="rateEdit">Change</button></h3><div class="r" style="display:flex;justify-content:space-between;gap:8px"><span>$1 =</span><b>'+'<span class="num">'+numStr("LBP",rate)+'</span><span class="unit">LBP</span></b></div>'+
+    '<div class="r" style="display:flex;justify-content:space-between;gap:8px;margin-top:6px"><span>Total balance in USD</span><b>'+money("USD",totUsd)+'</b></div>'+
+    '<div class="mt" style="color:var(--muted);font-size:12.5px;margin-top:8px">LBP amounts show their dollar value at this rate.</div></section>';
   var recent=txs.slice().sort(byDate).slice(0,6);
   h+='<section class="panel"><h3>Recent activity<button class="link" data-go="log">See all</button></h3>';
   if(!recent.length)h+='<div class="empty">No transactions yet.<br>Tap + to add your first income or expense.</div>';
@@ -312,7 +326,7 @@ function bars(list,cur,kind){
   var g=groupNames(list,cur,kind).slice(0,5);
   if(!g.length)return '<div class="mt" style="color:var(--muted);font-size:13px;margin-top:6px">Nothing yet</div>';
   var mx=g[0].sum;
-  return g.map(function(x){return '<div class="bar '+(kind==="in"?"inc":"")+'"><span class="nm">'+esc(x.name)+(x.n>1?' <span style="color:var(--muted)">×'+x.n+'</span>':"")+'</span><span>'+money(cur,x.sum)+'</span><span class="track"><span class="fill" style="display:block;width:'+Math.max(3,x.sum/mx*100)+'%"></span></span></div>'}).join("");
+  return g.map(function(x){return '<div class="bar '+(kind==="in"?"inc":"")+'"><span class="nm">'+esc(x.name)+(x.n>1?' <span style="color:var(--muted)">×'+x.n+'</span>':"")+'</span><span style="text-align:end">'+mv(cur,x.sum)+'</span><span class="track"><span class="fill" style="display:block;width:'+Math.max(3,x.sum/mx*100)+'%"></span></span></div>'}).join("");
 }
 
 function viewReport(){
@@ -324,10 +338,10 @@ function viewReport(){
     CURS.forEach(function(cur){
       var tt=totals(list,cur),bal=totals(cum,cur).net;
       h+='<section class="panel"><div class="cur-title"><span class="badge '+CUR[cur].cls+'">'+CUR[cur].short+'</span>'+CUR[cur].label+'</div><div class="kv">'+
-        '<div class="mini"><div class="t">Income</div><div class="v in">'+money(cur,tt.in)+'</div></div>'+
-        '<div class="mini"><div class="t">Expense</div><div class="v out">'+money(cur,tt.out)+'</div></div>'+
-        '<div class="mini"><div class="t">Net today</div><div class="v '+(tt.net>=0?"in":"out")+'">'+money(cur,tt.net,true)+'</div></div>'+
-        '<div class="mini"><div class="t">Balance at end of day</div><div class="v">'+money(cur,bal)+'</div></div></div></section>';
+        '<div class="mini"><div class="t">Income</div><div class="v in">'+mv(cur,tt.in)+'</div></div>'+
+        '<div class="mini"><div class="t">Expense</div><div class="v out">'+mv(cur,tt.out)+'</div></div>'+
+        '<div class="mini"><div class="t">Net today</div><div class="v '+(tt.net>=0?"in":"out")+'">'+mv(cur,tt.net,true)+'</div></div>'+
+        '<div class="mini"><div class="t">Balance at end of day</div><div class="v">'+mv(cur,bal)+'</div></div></div></section>';
     });
     h+='<section class="panel"><h3>Transactions today<small>'+list.length+'</small></h3>'+(list.length?'<div class="list">'+list.slice().sort(byDate).map(txRow).join("")+'</div>':'<div class="empty">No transactions on this day.</div>')+'</section>';
     h+='<button class="btn ghost" data-jump="today">Go to today</button>';
@@ -338,10 +352,10 @@ function viewReport(){
     CURS.forEach(function(cur){
       var tt=totals(ml,cur),bal=totals(upTo(last),cur).net;
       h+='<section class="panel"><div class="cur-title"><span class="badge '+CUR[cur].cls+'">'+CUR[cur].short+'</span>'+CUR[cur].label+'</div><div class="kv">'+
-        '<div class="mini"><div class="t">Income this month</div><div class="v in">'+money(cur,tt.in)+'</div></div>'+
-        '<div class="mini"><div class="t">Expenses this month</div><div class="v out">'+money(cur,tt.out)+'</div></div>'+
-        '<div class="mini"><div class="t">Net</div><div class="v '+(tt.net>=0?"in":"out")+'">'+money(cur,tt.net,true)+'</div></div>'+
-        '<div class="mini"><div class="t">Balance at month end</div><div class="v">'+money(cur,bal)+'</div></div></div>'+
+        '<div class="mini"><div class="t">Income this month</div><div class="v in">'+mv(cur,tt.in)+'</div></div>'+
+        '<div class="mini"><div class="t">Expenses this month</div><div class="v out">'+mv(cur,tt.out)+'</div></div>'+
+        '<div class="mini"><div class="t">Net</div><div class="v '+(tt.net>=0?"in":"out")+'">'+mv(cur,tt.net,true)+'</div></div>'+
+        '<div class="mini"><div class="t">Balance at month end</div><div class="v">'+mv(cur,bal)+'</div></div></div>'+
         '<div class="mt" style="margin:10px 2px 8px;font-size:13px;color:var(--muted)">Average daily spending: '+money(cur,tt.out/daysPassed)+'</div>'+
         chartSVG(m,cur)+
         '<h3 style="font-size:14px;margin-top:16px">Top spending</h3>'+bars(ml,cur,"out")+
@@ -396,7 +410,7 @@ function recentNames(kind){
 }
 function hintText(){
   var n=parseNum(draft.amount);if(!draft.amount||isNaN(n))return"";
-  return "= "+(draft.cur==="USD"?"$"+numStr("USD",n):numStr("LBP",n)+" LBP");
+  return "= "+(draft.cur==="USD"?"$"+numStr("USD",n):numStr("LBP",n)+" LBP · ≈ $"+numStr("USD",n/rate));
 }
 function drawSheet(){
   var d=draft,names=recentNames(d.kind);
@@ -418,6 +432,13 @@ function syncDraft(){
   if(a)draft.amount=a.value;if(n)draft.name=n.value;if(dt&&dt.value)draft.date=dt.value;
 }
 
+function openRate(){
+  draft=null;
+  $("#sheetHost").innerHTML='<div class="scrim" id="scrim"><form class="sheet" id="rateForm" role="dialog" aria-modal="true" aria-label="Exchange rate">'+
+    '<h2>Exchange rate</h2><div class="field"><label for="fRate">How many LBP is $1?</label><input class="amount" id="fRate" inputmode="decimal" autocomplete="off" value="'+rate+'"><div class="hint">Example: 89500 means $1 = 89,500 LBP. Changing it updates every dollar value shown for LBP amounts.</div></div>'+
+    '<div id="fErr" class="hint out" role="alert"></div><button class="btn" type="submit">Save rate</button><button type="button" class="btn ghost" id="cancel">Cancel</button></form></div>';
+  setTimeout(function(){var a=$("#fRate");if(a)a.focus()},60);
+}
 /* ---------- data ops ---------- */
 function toast(msg){
   var h=$("#toastHost");h.innerHTML='<div class="toast" role="status">'+esc(msg)+'</div>';
@@ -443,7 +464,7 @@ function delTx(id){
 
 /* ---------- events ---------- */
 document.addEventListener("click",function(e){
-  var el=e.target.closest("[data-tab],[data-go],[data-logcur],[data-logkind],[data-rep],[data-step],[data-jump],[data-edit],[data-k],[data-c],[data-name],#fab,#cancel,#scrim,#delAsk,#delYes,#exportCsv,#backup,#restore");
+  var el=e.target.closest("[data-tab],[data-go],[data-logcur],[data-logkind],[data-rep],[data-step],[data-jump],[data-edit],[data-k],[data-c],[data-name],#fab,#cancel,#scrim,#delAsk,#delYes,#exportCsv,#backup,#restore,#rateEdit");
   if(!el)return;
   if(el.id==="scrim"){if(e.target===el)closeSheet();return}
   var ds=el.dataset;
@@ -451,6 +472,7 @@ document.addEventListener("click",function(e){
   if(el.id==="cancel"){closeSheet();return}
   if(el.id==="exportCsv"){exportCsv();return}
   if(el.id==="backup"){backup();return}
+  if(el.id==="rateEdit"){openRate();return}
   if(el.id==="restore"){var rf=$("#restoreFile");if(rf)rf.click();return}
   if(draft){
     if(ds.k||ds.c||ds.name){
@@ -479,7 +501,14 @@ document.addEventListener("input",function(e){
   if(e.target.id==="fAmount"&&draft){draft.amount=e.target.value;$("#fHint").textContent=hintText()}
 });
 document.addEventListener("submit",function(e){
-  e.preventDefault();if(!draft)return;
+  e.preventDefault();
+  if(e.target.id==="rateForm"){
+    var rv=parseNum($("#fRate").value);
+    if(isNaN(rv)||rv<=0){$("#fErr").textContent="Enter the rate as a number.";return}
+    rate=rv;try{localStorage.setItem("hesabati.rate",String(rv))}catch(x){}
+    closeSheet();render();toast("Rate updated");return;
+  }
+  if(!draft)return;
   syncDraft();
   var n=parseNum(draft.amount),err=$("#fErr");
   if(isNaN(n)||n<=0){err.textContent="Enter the amount as a number.";return}
