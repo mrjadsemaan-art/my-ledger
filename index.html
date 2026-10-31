@@ -142,6 +142,7 @@ input[type=date]::-webkit-date-and-time-value{text-align:start;min-width:0}
 .cur-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;margin-bottom:12px}
 .cur-title .badge{width:30px;height:30px;border-radius:10px;font-size:12px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(100px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:60;max-width:90%}
+.rw{display:flex;justify-content:space-between;gap:10px;align-items:baseline;font-size:14px}
 .pill{font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:var(--surface2);color:var(--muted);white-space:nowrap}
 .sec{font-weight:700;font-size:14px;margin-top:2px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -245,20 +246,41 @@ function totals(list,cur){
 function byDate(a,b){return a.date<b.date?1:a.date>b.date?-1:(b.ts||0)-(a.ts||0)}
 function isTrade(t){return t.kind==="trade"}
 function toUsd(cur,n){return cur==="USD"?n:n/rate}
+function qtyStr(n){return Number.isInteger(n)?String(n):String(Math.round(n*100)/100)}
+function normTrade(t){
+  if(!t||t.kind!=="trade")return t;
+  if(!(t.qty>0))t.qty=1;
+  if(!Array.isArray(t.sales)){
+    t.sales=[];
+    if(t.sellAmt>0)t.sales.push({id:"s1",qty:t.qty,amt:t.sellAmt,cur:t.sellCur||t.buyCur,date:t.sellDate||t.buyDate});
+  }
+  delete t.sellAmt;delete t.sellCur;delete t.sellDate;
+  return t;
+}
+function soldQty(t){var q=0;(t.sales||[]).forEach(function(s){q+=s.qty});return q}
+function leftQty(t){var l=Math.round((t.qty-soldQty(t))*1e6)/1e6;return l<0?0:l}
 function flows(){
   var out=[];
   txs.forEach(function(t){
     if(!isTrade(t)){out.push(t);return}
     out.push({id:"tb:"+t.id,kind:"out",cur:t.buyCur,amount:t.buyAmt,name:"Bought: "+t.name,date:t.buyDate,ts:t.ts});
-    if(t.sellAmt>0&&t.sellDate)out.push({id:"ts:"+t.id,kind:"in",cur:t.sellCur,amount:t.sellAmt,name:"Sold: "+t.name,date:t.sellDate,ts:t.ts});
+    (t.sales||[]).forEach(function(s){out.push({id:"ts:"+t.id+":"+s.id,kind:"in",cur:s.cur,amount:s.amt,name:"Sold: "+t.name,date:s.date,ts:t.ts})});
   });
   return out;
 }
-function tradeProfit(t){
-  if(!(t.sellAmt>0))return null;
-  if(t.buyCur===t.sellCur)return {cur:t.buyCur,p:t.sellAmt-t.buyAmt,pct:t.buyAmt>0?(t.sellAmt-t.buyAmt)/t.buyAmt*100:0,mixed:false};
-  var c=toUsd(t.buyCur,t.buyAmt),r=toUsd(t.sellCur,t.sellAmt);
-  return {cur:"USD",p:r-c,pct:c>0?(r-c)/c*100:0,mixed:true};
+function saleProfit(t,s){
+  var cost=t.buyAmt/t.qty*s.qty,p,r;
+  if(s.cur===t.buyCur){p=s.amt-cost;r={cur:s.cur,p:p,mixed:false,base:cost}}
+  else{var c=toUsd(t.buyCur,cost),v=toUsd(s.cur,s.amt);r={cur:"USD",p:v-c,mixed:true,base:c}}
+  r.pct=r.base>0?r.p/r.base*100:0;return r;
+}
+function itemProfit(t){
+  var ss=t.sales||[];if(!ss.length)return null;
+  var qs=ss.map(function(s){return saleProfit(t,s)}),same=qs.every(function(q){return !q.mixed&&q.cur===qs[0].cur});
+  var p=0,b=0;
+  if(same){qs.forEach(function(q){p+=q.p;b+=q.base});return {cur:qs[0].cur,p:p,mixed:false,pct:b>0?p/b*100:0}}
+  qs.forEach(function(q){p+=toUsd(q.cur,q.p);b+=toUsd(q.cur,q.base)});
+  return {cur:"USD",p:p,mixed:true,pct:b>0?p/b*100:0};
 }
 function upTo(date){return flows().filter(function(t){return t.date<=date})}
 function monthTxs(m){return flows().filter(function(t){return t.date.slice(0,7)===m})}
@@ -409,39 +431,43 @@ function warnBanner(){
   return '<div class="warn"><b>Heads up: your data is not saved permanently.</b><br>'+m+(health.ls?" It is only kept on this device and may be erased when you close the app.":" This device is also blocking local storage, so everything is erased when you close the app.")+'<br>Download a backup after you enter transactions.</div>';
 }
 function viewTrades(){
-  var tr=txs.filter(isTrade).sort(function(a,b){var x=a.sellDate||a.buyDate,y=b.sellDate||b.buyDate;return x<y?1:x>y?-1:0});
-  var sold=tr.filter(function(t){return t.sellAmt>0}),stock=tr.filter(function(t){return !(t.sellAmt>0)});
-  var net=0,grp={USD:0,LBP:0,mix:0},hasMix=false;
-  sold.forEach(function(t){var q=tradeProfit(t);net+=toUsd(q.cur,q.p);if(q.mixed){grp.mix+=q.p;hasMix=true}else grp[q.cur]+=q.p});
-  var cost={USD:0,LBP:0};stock.forEach(function(t){cost[t.buyCur]+=t.buyAmt});
+  var tr=txs.filter(isTrade).sort(function(a,b){var x=lastDate(a),y=lastDate(b);return x<y?1:x>y?-1:0});
+  var net=0,grp={USD:0,LBP:0,mix:0},hasMix=false,cost={USD:0,LBP:0},active=0,done=0,nSales=0;
+  tr.forEach(function(t){
+    (t.sales||[]).forEach(function(s){var q=saleProfit(t,s);net+=toUsd(q.cur,q.p);nSales++;if(q.mixed){grp.mix+=q.p;hasMix=true}else grp[q.cur]+=q.p});
+    var l=leftQty(t);if(l>0){active++;cost[t.buyCur]+=t.buyAmt/t.qty*l}else done++;
+  });
   var h='<div class="top"><h1 class="brand">Trades</h1><button class="btn small" id="newItem">+ New item</button></div><div class="stack">';
-  h+='<section class="panel"><div class="cap" style="color:var(--muted)">Net profit'+(sold.length?"":"")+'</div>'+
-    '<div class="big2 '+(net>=0?"in":"out")+'" style="font-size:30px;font-weight:700;line-height:1.2">'+(grp.LBP||hasMix?"≈ ":"")+money("USD",net,true)+'</div>'+
-    '<div class="kv" style="margin-top:12px"><div class="mini"><div class="t">Sold</div><div class="v">'+sold.length+'</div></div><div class="mini"><div class="t">In stock</div><div class="v">'+stock.length+'</div></div></div>';
-  var lines=[];
-  if(grp.USD)lines.push('<div class="r" style="display:flex;justify-content:space-between;margin-top:8px"><span>USD trades</span><b class="'+(grp.USD>=0?"in":"out")+'">'+money("USD",grp.USD,true)+'</b></div>');
-  if(grp.LBP)lines.push('<div class="r" style="display:flex;justify-content:space-between;margin-top:8px"><span>LBP trades</span><b class="'+(grp.LBP>=0?"in":"out")+'">'+mv("LBP",grp.LBP,true)+'</b></div>');
-  if(hasMix)lines.push('<div class="r" style="display:flex;justify-content:space-between;margin-top:8px"><span>Mixed currency (≈ USD)</span><b class="'+(grp.mix>=0?"in":"out")+'">'+money("USD",grp.mix,true)+'</b></div>');
-  if(cost.USD||cost.LBP)lines.push('<div class="r" style="display:flex;justify-content:space-between;margin-top:8px;color:var(--muted)"><span>Money tied up in stock</span><span>'+(cost.USD?money("USD",cost.USD):"")+(cost.USD&&cost.LBP?" + ":"")+(cost.LBP?money("LBP",cost.LBP):"")+'</span></div>');
-  h+=lines.join("")+'</section>';
-  h+='<div class="seg" role="group" aria-label="Filter">'+[["ALL","All"],["stock","In stock"],["sold","Sold"]].map(function(x){return '<button data-trfilter="'+x[0]+'" aria-pressed="'+(ui.trFilter===x[0])+'">'+x[1]+'</button>'}).join("")+'</div>';
-  var list=tr.filter(function(t){return ui.trFilter==="ALL"||(ui.trFilter==="sold"?t.sellAmt>0:!(t.sellAmt>0))});
-  if(!tr.length)h+='<div class="panel"><div class="empty">No items yet.<br>Tap + New item, enter what you bought it for, and add the sale price when you sell it. Profit or loss is worked out for you.</div></div>';
+  h+='<section class="panel"><div class="cap" style="color:var(--muted)">Profit so far</div>'+
+    '<div class="'+(net>=0?"in":"out")+'" style="font-size:30px;font-weight:700;line-height:1.2">'+(grp.LBP||hasMix?"≈ ":"")+money("USD",net,true)+'</div>'+
+    '<div class="kv" style="margin-top:12px"><div class="mini"><div class="t">Still selling</div><div class="v">'+active+'</div></div><div class="mini"><div class="t">Sold out</div><div class="v">'+done+'</div></div></div>';
+  var L=[],row='<div class="rw" style="margin-top:8px">';
+  if(grp.USD)L.push(row+'<span>USD sales</span><b class="'+(grp.USD>=0?"in":"out")+'">'+money("USD",grp.USD,true)+'</b></div>');
+  if(grp.LBP)L.push(row+'<span>LBP sales</span><b class="'+(grp.LBP>=0?"in":"out")+'">'+mv("LBP",grp.LBP,true)+'</b></div>');
+  if(hasMix)L.push(row+'<span>Mixed currency (≈ USD)</span><b class="'+(grp.mix>=0?"in":"out")+'">'+money("USD",grp.mix,true)+'</b></div>');
+  if(cost.USD||cost.LBP)L.push('<div class="rw" style="margin-top:8px;color:var(--muted)"><span>Money tied up in stock</span><span>'+(cost.USD?money("USD",cost.USD):"")+(cost.USD&&cost.LBP?" + ":"")+(cost.LBP?money("LBP",cost.LBP):"")+'</span></div>');
+  h+=L.join("")+'</section>';
+  h+='<div class="seg" role="group" aria-label="Filter">'+[["ALL","All"],["stock","In stock"],["sold","Sold out"]].map(function(x){return '<button data-trfilter="'+x[0]+'" aria-pressed="'+(ui.trFilter===x[0])+'">'+x[1]+'</button>'}).join("")+'</div>';
+  var list=tr.filter(function(t){var l=leftQty(t);return ui.trFilter==="ALL"||(ui.trFilter==="stock"?l>0:l<=0)});
+  if(!tr.length)h+='<div class="panel"><div class="empty">No items yet.<br>Tap + New item, enter how many you bought and what you paid. Then record each sale as it happens. Profit is worked out for you.</div></div>';
   else if(!list.length)h+='<div class="empty">Nothing here.</div>';
   else h+='<section class="panel"><div class="list">'+list.map(tradeRow).join("")+'</div></section>';
   return h+'</div>';
 }
+function lastDate(t){var d=t.buyDate;(t.sales||[]).forEach(function(s){if(s.date>d)d=s.date});return d}
 function tradeRow(t){
-  var q=tradeProfit(t),mt='Bought '+money(t.buyCur,t.buyAmt)+' · '+relDay(t.buyDate);
-  if(q)mt+='<br>Sold '+money(t.sellCur,t.sellAmt)+' · '+relDay(t.sellDate);
+  var q=itemProfit(t),l=leftQty(t),sold=soldQty(t);
+  var mt='Bought '+qtyStr(t.qty)+' for '+money(t.buyCur,t.buyAmt)+' · '+relDay(t.buyDate);
+  if(sold>0)mt+='<br>Sold '+qtyStr(sold)+' · '+(l>0?qtyStr(l)+' left':'sold out');
+  else mt+='<br>'+qtyStr(l)+' in stock';
   var right=q?'<span class="amt '+(q.p>=0?"in":"out")+'">'+(q.mixed?"≈ ":"")+money(q.cur,q.p,true)+'<span class="eq">'+(q.pct>=0?"+":"")+q.pct.toFixed(1)+'%</span></span>':'<span class="pill">In stock</span>';
   return '<button class="row" data-trade="'+esc(t.id)+'"><span class="badge '+(q?(q.p>=0?"usd":"lbp"):"")+'">'+(q?(q.p>=0?"+":"−"):"•")+'</span><span class="mid"><div class="nm">'+esc(t.name)+'</div><div class="mt">'+mt+'</div></span>'+right+'</button>';
 }
 function tradingMonth(m){
-  var sold=txs.filter(function(t){return isTrade(t)&&t.sellAmt>0&&t.sellDate.slice(0,7)===m});
-  if(!sold.length)return"";
-  var net=0,w=0,l=0;sold.forEach(function(t){var q=tradeProfit(t),u=toUsd(q.cur,q.p);net+=u;if(u>=0)w++;else l++});
-  return '<section class="panel"><div class="cur-title">Trading this month</div><div class="kv"><div class="mini"><div class="t">Net profit</div><div class="v '+(net>=0?"in":"out")+'">≈ '+money("USD",net,true)+'</div></div><div class="mini"><div class="t">Items sold</div><div class="v">'+sold.length+'</div></div><div class="mini"><div class="t">Made profit</div><div class="v in">'+w+'</div></div><div class="mini"><div class="t">Made a loss</div><div class="v out">'+l+'</div></div></div></section>';
+  var net=0,w=0,l=0,n=0;
+  txs.forEach(function(t){if(!isTrade(t))return;(t.sales||[]).forEach(function(s){if(s.date.slice(0,7)!==m)return;var q=saleProfit(t,s),u=toUsd(q.cur,q.p);net+=u;n++;if(u>=0)w++;else l++})});
+  if(!n)return"";
+  return '<section class="panel"><div class="cur-title">Trading this month</div><div class="kv"><div class="mini"><div class="t">Profit</div><div class="v '+(net>=0?"in":"out")+'">≈ '+money("USD",net,true)+'</div></div><div class="mini"><div class="t">Sales made</div><div class="v">'+n+'</div></div><div class="mini"><div class="t">Sales with profit</div><div class="v in">'+w+'</div></div><div class="mini"><div class="t">Sales at a loss</div><div class="v out">'+l+'</div></div></div></section>';
 }
 function syncNote(){
   var st=health.db==="ok"?'<div class="okline">Saved on this device ✓ · works offline</div>':'<div>'+(WHY[health.db]||"")+'</div>';
@@ -465,7 +491,7 @@ function openSheet(t){
   drawSheet();
   setTimeout(function(){var a=$("#fAmount");if(a&&!draft.edit)a.focus()},60);
 }
-function closeSheet(){$("#sheetHost").innerHTML="";draft=null;tdraft=null}
+function closeSheet(){$("#sheetHost").innerHTML="";draft=null;tdraft=null;sdraft=null;detailId=null}
 function recentNames(kind){
   var seen={},out=[];
   txs.filter(function(t){return !isTrade(t)}).slice().sort(byDate).forEach(function(t){if(t.kind!==kind)return;var k=t.name.trim().toLowerCase();if(seen[k])return;seen[k]=1;out.push(t.name.trim())});
@@ -502,49 +528,119 @@ function openRate(){
     '<div id="fErr" class="hint out" role="alert"></div><button class="btn" type="submit">Save rate</button><button type="button" class="btn ghost" id="cancel">Cancel</button></form></div>';
   setTimeout(function(){var a=$("#fRate");if(a)a.focus()},60);
 }
-var tdraft=null;
-function openTrade(id){
-  var t=id?txs.find(function(x){return x.id===id}):null;
-  draft=null;
-  tdraft=t?{id:t.id,name:t.name,buyAmt:String(t.buyAmt),buyCur:t.buyCur,buyDate:t.buyDate,sellAmt:t.sellAmt>0?String(t.sellAmt):"",sellCur:t.sellAmt>0?t.sellCur:t.buyCur,sellDate:t.sellDate||todayStr(),edit:true,confirm:false}:
-    {id:null,name:"",buyAmt:"",buyCur:"USD",buyDate:todayStr(),sellAmt:"",sellCur:"USD",sellDate:todayStr(),edit:false,confirm:false};
-  drawTrade();
-  setTimeout(function(){var a=$(tdraft&&tdraft.edit&&!tdraft.sellAmt?"#tSell":"#tName");if(a)a.focus()},60);
-}
+var tdraft=null,sdraft=null,detailId=null;
 function curSeg(attr,val){
   return '<div class="seg" role="group" aria-label="Currency"><button type="button" data-'+attr+'="USD" aria-pressed="'+(val==="USD")+'">USD $</button><button type="button" data-'+attr+'="LBP" aria-pressed="'+(val==="LBP")+'">LBP</button></div>';
 }
+function modeSeg(attr,val,a,b){
+  return '<div class="seg" role="group" aria-label="Price type"><button type="button" data-'+attr+'="unit" aria-pressed="'+(val==="unit")+'">'+a+'</button><button type="button" data-'+attr+'="total" aria-pressed="'+(val==="total")+'">'+b+'</button></div>';
+}
+function getTrade(id){return txs.find(function(x){return x.id===id})}
+function putSheet(html){$("#sheetHost").innerHTML='<div class="scrim" id="scrim">'+html+'</div>'}
+
+/* ---- item (purchase) form ---- */
+function openTrade(id){
+  var t=id?getTrade(id):null;draft=null;sdraft=null;
+  tdraft=t?{id:t.id,name:t.name,qty:qtyStr(t.qty),mode:"total",price:String(Math.round(t.buyAmt*100)/100),buyCur:t.buyCur,buyDate:t.buyDate,edit:true,confirm:false}:
+    {id:null,name:"",qty:"1",mode:"total",price:"",buyCur:"USD",buyDate:todayStr(),edit:false,confirm:false};
+  drawTrade();
+  setTimeout(function(){var a=$("#tName");if(a&&!tdraft.edit)a.focus()},60);
+}
+function tTotal(d){var q=parseNum(d.qty),p=parseNum(d.price);if(isNaN(q)||q<=0||isNaN(p)||p<=0)return null;return {qty:q,total:d.mode==="unit"?p*q:p}}
 function tHint(){
-  var d=tdraft,b=parseNum(d.buyAmt),sl=parseNum(d.sellAmt);
-  if(isNaN(b)||b<=0)return "";
-  if(isNaN(sl)||sl<=0)return '<span style="color:var(--muted);font-weight:500">Not sold yet. It shows as In stock.</span>';
-  var q=tradeProfit({buyAmt:b,buyCur:d.buyCur,sellAmt:sl,sellCur:d.sellCur});
-  return '<span class="'+(q.p>=0?"in":"out")+'">'+(q.p>=0?"Profit ":"Loss ")+(q.mixed?"≈ ":"")+money(q.cur,Math.abs(q.p))+' ('+(q.pct>=0?"+":"")+q.pct.toFixed(1)+'%)</span>';
+  var r=tTotal(tdraft);if(!r)return"";
+  return 'Total '+money(tdraft.buyCur,r.total)+' · '+money(tdraft.buyCur,r.total/r.qty)+' each';
 }
 function drawTrade(){
   var d=tdraft;
-  $("#sheetHost").innerHTML='<div class="scrim" id="scrim"><form class="sheet" id="tradeForm" role="dialog" aria-modal="true" aria-label="Item">'+
-    '<h2>'+(d.edit?"Edit item":"New item")+'</h2>'+
-    '<div class="field"><label for="tName">Item name</label><input id="tName" autocomplete="off" placeholder="e.g. iPhone 13, tires, laptop" value="'+esc(d.name)+'"></div>'+
-    '<div class="tcard"><div class="sec">Bought for</div>'+curSeg("bc",d.buyCur)+
-      '<div class="grid2"><div class="field"><label for="tBuy">Price</label><input id="tBuy" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.buyAmt)+'"></div><div class="field"><label for="tBuyDate">Date</label><input id="tBuyDate" type="date" value="'+d.buyDate+'"></div></div></div>'+
-    '<div class="tcard"><div class="sec">Sold for <span style="font-weight:400;color:var(--muted);font-size:12.5px">(leave empty if not sold yet)</span></div>'+curSeg("sc",d.sellCur)+
-      '<div class="grid2"><div class="field"><label for="tSell">Price</label><input id="tSell" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.sellAmt)+'"></div><div class="field"><label for="tSellDate">Date</label><input id="tSellDate" type="date" value="'+d.sellDate+'"></div></div></div>'+
+  putSheet('<form class="sheet" id="tradeForm" role="dialog" aria-modal="true" aria-label="Item">'+
+    '<h2>'+(d.edit?"Edit purchase":"New item")+'</h2>'+
+    '<div class="field"><label for="tName">Item name</label><input id="tName" autocomplete="off" placeholder="e.g. Phone cases, tires, sneakers" value="'+esc(d.name)+'"></div>'+
+    '<div class="field"><label for="tQty">How many did you buy?</label><input id="tQty" inputmode="decimal" autocomplete="off" placeholder="1" value="'+esc(d.qty)+'"></div>'+
+    '<div class="tcard"><div class="sec">What you paid</div>'+modeSeg("bm",d.mode,"Per unit","Total for all")+curSeg("bc",d.buyCur)+
+      '<div class="grid2"><div class="field"><label for="tBuy">'+(d.mode==="unit"?"Price each":"Total price")+'</label><input id="tBuy" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.price)+'"></div><div class="field"><label for="tBuyDate">Date</label><input id="tBuyDate" type="date" value="'+d.buyDate+'"></div></div></div>'+
     '<div class="hint pf" id="tHint">'+tHint()+'</div>'+
     '<div id="fErr" class="hint out" role="alert"></div>'+
     '<button class="btn" type="submit">'+(d.edit?"Save changes":"Save item")+'</button>'+
-    (d.edit?(d.confirm?'<button type="button" class="btn danger" id="tDelYes">Sure? Tap again to delete</button>':'<button type="button" class="btn danger" id="tDelAsk">Delete item</button>'):"")+
-    '<button type="button" class="btn ghost" id="cancel">Cancel</button></form></div>';
+    (d.edit?(d.confirm?'<button type="button" class="btn danger" id="tDelYes">Sure? Deletes the item and all its sales</button>':'<button type="button" class="btn danger" id="tDelAsk">Delete item</button>'):"")+
+    '<button type="button" class="btn ghost" id="'+(d.edit?"tBack":"cancel")+'">Cancel</button></form>');
 }
 function syncTrade(){
-  var g=function(i){var e=$(i);return e?e.value:null};
-  var v;
+  var g=function(i){var e=$(i);return e?e.value:null},v;
   if((v=g("#tName"))!==null)tdraft.name=v;
-  if((v=g("#tBuy"))!==null)tdraft.buyAmt=v;
-  if((v=g("#tSell"))!==null)tdraft.sellAmt=v;
+  if((v=g("#tQty"))!==null)tdraft.qty=v;
+  if((v=g("#tBuy"))!==null)tdraft.price=v;
   if((v=g("#tBuyDate"))&&v)tdraft.buyDate=v;
-  if((v=g("#tSellDate"))&&v)tdraft.sellDate=v;
 }
+
+/* ---- item detail ---- */
+function openDetail(id){
+  var t=getTrade(id);if(!t){closeSheet();return}
+  draft=null;tdraft=null;sdraft=null;detailId=id;drawDetail();
+}
+function drawDetail(){
+  var t=getTrade(detailId);if(!t){closeSheet();return}
+  var q=itemProfit(t),l=leftQty(t),sold=soldQty(t),unit=t.buyAmt/t.qty;
+  var sales=(t.sales||[]).slice().sort(function(a,b){return a.date<b.date?1:a.date>b.date?-1:0});
+  var h='<div class="sheet" role="dialog" aria-modal="true" aria-label="Item details"><h2>'+esc(t.name)+'</h2>'+
+    '<div class="tcard">'+
+    '<div class="rw"><span>Bought</span><b>'+qtyStr(t.qty)+' · '+money(t.buyCur,t.buyAmt)+'</b></div>'+
+    '<div class="rw" style="color:var(--muted)"><span>Cost each</span><span>'+money(t.buyCur,unit)+'</span></div>'+
+    '<div class="rw"><span>Sold</span><b>'+qtyStr(sold)+'</b></div>'+
+    '<div class="rw"><span>Left in stock</span><b>'+qtyStr(l)+'</b></div>'+
+    (l>0?'<div class="rw" style="color:var(--muted)"><span>Tied up in stock</span><span>'+money(t.buyCur,unit*l)+'</span></div>':"")+
+    '<div class="rw"><span>Profit so far</span><b class="'+(q?(q.p>=0?"in":"out"):"")+'">'+(q?(q.mixed?"≈ ":"")+money(q.cur,q.p,true)+' ('+(q.pct>=0?"+":"")+q.pct.toFixed(1)+'%)':"No sales yet")+'</b></div></div>';
+  h+='<div class="sec">Sales</div>';
+  if(!sales.length)h+='<div class="empty" style="padding:6px">No sales yet. Tap Record a sale each time you sell some.</div>';
+  else h+='<div class="list">'+sales.map(function(s){
+    var sp=saleProfit(t,s);
+    return '<button class="row" data-sale="'+esc(s.id)+'"><span class="mid"><div class="nm">'+qtyStr(s.qty)+' × '+money(s.cur,s.amt/s.qty)+'</div><div class="mt">'+relDay(s.date)+' · total '+money(s.cur,s.amt)+'</div></span><span class="amt '+(sp.p>=0?"in":"out")+'">'+(sp.mixed?"≈ ":"")+money(sp.cur,sp.p,true)+'</span></button>';
+  }).join("")+'</div>';
+  h+=(l>0?'<button class="btn" id="addSale">+ Record a sale</button>':'<div class="empty" style="padding:6px">All sold out.</div>')+
+    '<button class="btn ghost" id="editBuy">Edit purchase</button><button class="btn ghost" id="cancel">Close</button></div>';
+  putSheet(h);
+}
+
+/* ---- sale form ---- */
+function openSale(tid,sid){
+  var t=getTrade(tid);if(!t)return;
+  var s=sid?(t.sales||[]).find(function(x){return x.id===sid}):null;
+  var lastCur=(t.sales&&t.sales.length)?t.sales[t.sales.length-1].cur:t.buyCur;
+  sdraft=s?{tid:tid,id:s.id,qty:qtyStr(s.qty),mode:"unit",price:String(Math.round(s.amt/s.qty*100)/100),cur:s.cur,date:s.date,edit:true,confirm:false}:
+    {tid:tid,id:null,qty:"",mode:"unit",price:"",cur:lastCur,date:todayStr(),edit:false,confirm:false};
+  drawSale();
+  setTimeout(function(){var a=$("#sQty");if(a&&!sdraft.edit)a.focus()},60);
+}
+function sCalc(){
+  var d=sdraft,t=getTrade(d.tid),q=parseNum(d.qty),p=parseNum(d.price);
+  if(isNaN(q)||q<=0||isNaN(p)||p<=0)return null;
+  var total=d.mode==="unit"?p*q:p;return {t:t,qty:q,total:total};
+}
+function sHint(){
+  var c=sCalc();if(!c)return"";
+  var pr=saleProfit(c.t,{qty:c.qty,amt:c.total,cur:sdraft.cur});
+  return 'Total '+money(sdraft.cur,c.total)+' · <span class="'+(pr.p>=0?"in":"out")+'">'+(pr.p>=0?"Profit ":"Loss ")+(pr.mixed?"≈ ":"")+money(pr.cur,Math.abs(pr.p))+' ('+(pr.pct>=0?"+":"")+pr.pct.toFixed(1)+'%)</span>';
+}
+function drawSale(){
+  var d=sdraft,t=getTrade(d.tid),own=d.edit?((t.sales||[]).find(function(x){return x.id===d.id})||{qty:0}).qty:0,avail=leftQty(t)+own;
+  putSheet('<form class="sheet" id="saleForm" role="dialog" aria-modal="true" aria-label="Sale">'+
+    '<h2>'+(d.edit?"Edit sale":"Record a sale")+'</h2><div class="dateline" style="margin-top:-8px">'+esc(t.name)+' · '+qtyStr(avail)+' available</div>'+
+    '<div class="field"><label for="sQty">How many did you sell?</label><input id="sQty" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.qty)+'"></div>'+
+    '<div class="tcard"><div class="sec">Sold for</div>'+modeSeg("sm",d.mode,"Price each","Total for all")+curSeg("sc",d.cur)+
+      '<div class="grid2"><div class="field"><label for="sPrice">'+(d.mode==="unit"?"Price each":"Total price")+'</label><input id="sPrice" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.price)+'"></div><div class="field"><label for="sDate">Date</label><input id="sDate" type="date" value="'+d.date+'"></div></div></div>'+
+    '<div class="hint pf" id="sHint">'+sHint()+'</div>'+
+    '<div id="fErr" class="hint out" role="alert"></div>'+
+    '<button class="btn" type="submit">'+(d.edit?"Save changes":"Save sale")+'</button>'+
+    (d.edit?(d.confirm?'<button type="button" class="btn danger" id="sDelYes">Sure? Tap again to delete</button>':'<button type="button" class="btn danger" id="sDelAsk">Delete sale</button>'):"")+
+    '<button type="button" class="btn ghost" id="sBack">Cancel</button></form>');
+}
+function syncSale(){
+  var g=function(i){var e=$(i);return e?e.value:null},v;
+  if((v=g("#sQty"))!==null)sdraft.qty=v;
+  if((v=g("#sPrice"))!==null)sdraft.price=v;
+  if((v=g("#sDate"))&&v)sdraft.date=v;
+}
+
 /* ---------- data ops ---------- */
 function toast(msg){
   var h=$("#toastHost");h.innerHTML='<div class="toast" role="status">'+esc(msg)+'</div>';
@@ -571,7 +667,7 @@ function delTx(id){
 
 /* ---------- events ---------- */
 document.addEventListener("click",function(e){
-  var el=e.target.closest("[data-tab],[data-go],[data-logcur],[data-logkind],[data-rep],[data-step],[data-jump],[data-edit],[data-k],[data-c],[data-name],#fab,#cancel,#scrim,#delAsk,#delYes,#exportCsv,#backup,#restore,#rateEdit,[data-bc],[data-sc],[data-trade],[data-trfilter],#newItem,#tDelAsk,#tDelYes");
+  var el=e.target.closest("[data-tab],[data-go],[data-logcur],[data-logkind],[data-rep],[data-step],[data-jump],[data-edit],[data-k],[data-c],[data-name],#fab,#cancel,#scrim,#delAsk,#delYes,#exportCsv,#backup,#restore,#rateEdit,[data-bc],[data-bm],[data-sc],[data-sm],[data-trade],[data-sale],[data-trfilter],#newItem,#tDelAsk,#tDelYes,#sDelAsk,#sDelYes,#tBack,#sBack,#addSale,#editBuy");
   if(!el)return;
   if(el.id==="scrim"){if(e.target===el)closeSheet();return}
   var ds=el.dataset;
@@ -582,19 +678,45 @@ document.addEventListener("click",function(e){
   if(el.id==="rateEdit"){openRate();return}
   if(el.id==="restore"){var rf=$("#restoreFile");if(rf)rf.click();return}
   if(ds.k==="trade"){closeSheet();openTrade(null);return}
+  if(el.id==="newItem"){openTrade(null);return}
+  if(ds.trade){openDetail(ds.trade);return}
+  if(ds.trfilter){ui.trFilter=ds.trfilter;render();return}
+  if(el.id==="tBack"||el.id==="editBuyBack"){openDetail(tdraft.id);return}
+  if(el.id==="sBack"){var bt=sdraft.tid;sdraft=null;openDetail(bt);return}
+  if(el.id==="addSale"){openSale(detailId,null);return}
+  if(el.id==="editBuy"){openTrade(detailId);return}
+  if(ds.sale){openSale(detailId,ds.sale);return}
   if(tdraft){
-    if(ds.bc||ds.sc||el.id==="tDelAsk"){
+    if(ds.bc||ds.bm||el.id==="tDelAsk"){
       syncTrade();
-      if(ds.bc){tdraft.buyCur=ds.bc;if(!String(tdraft.sellAmt).trim())tdraft.sellCur=ds.bc}
-      if(ds.sc)tdraft.sellCur=ds.sc;
+      if(ds.bc)tdraft.buyCur=ds.bc;
+      if(ds.bm&&ds.bm!==tdraft.mode){
+        var r=tTotal(tdraft);
+        if(r)tdraft.price=String(Math.round((ds.bm==="unit"?r.total/r.qty:r.total)*100)/100);
+        tdraft.mode=ds.bm;
+      }
       if(el.id==="tDelAsk")tdraft.confirm=true;
       drawTrade();return;
     }
     if(el.id==="tDelYes"){var tid=tdraft.id;closeSheet();delTx(tid);toast("Deleted");return}
   }
-  if(el.id==="newItem"){openTrade(null);return}
-  if(ds.trade){openTrade(ds.trade);return}
-  if(ds.trfilter){ui.trFilter=ds.trfilter;render();return}
+  if(sdraft){
+    if(ds.sc||ds.sm||el.id==="sDelAsk"){
+      syncSale();
+      if(ds.sc)sdraft.cur=ds.sc;
+      if(ds.sm&&ds.sm!==sdraft.mode){
+        var c=sCalc();
+        if(c)sdraft.price=String(Math.round((ds.sm==="unit"?c.total/c.qty:c.total)*100)/100);
+        sdraft.mode=ds.sm;
+      }
+      if(el.id==="sDelAsk")sdraft.confirm=true;
+      drawSale();return;
+    }
+    if(el.id==="sDelYes"){
+      var t0=getTrade(sdraft.tid),sid=sdraft.id,nt=Object.assign({},t0,{sales:(t0.sales||[]).filter(function(x){return x.id!==sid})});
+      sdraft=null;saveTx(nt);openDetail(nt.id);toast("Sale deleted");return;
+    }
+  }
   if(draft){
     if(ds.k||ds.c||ds.name){
       syncDraft();
@@ -617,25 +739,39 @@ document.addEventListener("click",function(e){
     render();return;
   }
   if(ds.edit){
-    if(/^t[bs]:/.test(ds.edit)){openTrade(ds.edit.slice(3));return}
+    if(/^t[bs]:/.test(ds.edit)){openDetail(ds.edit.split(":")[1]);return}
     var t=txs.find(function(x){return x.id===ds.edit});if(t)openSheet(t)
   }
 });
 document.addEventListener("input",function(e){
-  if(tdraft&&/^t(Name|Buy|Sell|BuyDate|SellDate)$/.test(e.target.id)){syncTrade();var th=$("#tHint");if(th)th.innerHTML=tHint();return}
+  if(tdraft&&/^t(Name|Qty|Buy|BuyDate)$/.test(e.target.id)){syncTrade();var th=$("#tHint");if(th)th.innerHTML=tHint();return}
+  if(sdraft&&/^s(Qty|Price|Date)$/.test(e.target.id)){syncSale();var sh=$("#sHint");if(sh)sh.innerHTML=sHint();return}
   if(e.target.id==="fAmount"&&draft){draft.amount=e.target.value;$("#fHint").textContent=hintText()}
 });
 document.addEventListener("submit",function(e){
   e.preventDefault();
   if(e.target.id==="tradeForm"&&tdraft){
-    syncTrade();var d=tdraft,er=$("#fErr"),b=parseNum(d.buyAmt),sl=d.sellAmt.trim()?parseNum(d.sellAmt):0;
+    syncTrade();var d=tdraft,er=$("#fErr"),r=tTotal(d);
     if(!d.name.trim()){er.textContent="Enter the item name.";return}
-    if(isNaN(b)||b<=0){er.textContent="Enter the price you bought it for.";return}
-    if(isNaN(sl)||sl<0){er.textContent="The sold price must be a number, or leave it empty.";return}
-    if(sl>0&&d.sellDate<d.buyDate){er.textContent="The sold date is before the bought date.";return}
-    var old=d.id?txs.find(function(x){return x.id===d.id}):null;
-    var tr={id:d.id||newId(),kind:"trade",name:d.name.trim(),buyAmt:Math.round(b*100)/100,buyCur:d.buyCur,buyDate:d.buyDate,sellAmt:Math.round(sl*100)/100,sellCur:d.sellCur,sellDate:sl>0?d.sellDate:"",date:d.buyDate,ts:old?old.ts:Date.now()};
-    var was=d.edit;closeSheet();saveTx(tr);toast(was?"Updated":"Saved");return;
+    if(!r){er.textContent="Enter how many you bought and the price.";return}
+    var old=d.id?getTrade(d.id):null;
+    if(old&&r.qty<soldQty(old)-1e-9){er.textContent="You already sold "+qtyStr(soldQty(old))+", so the quantity can't be lower.";return}
+    if(old&&(old.sales||[]).some(function(s){return s.date<d.buyDate})){er.textContent="The purchase date is after one of the sales.";return}
+    var tr={id:d.id||newId(),kind:"trade",name:d.name.trim(),qty:r.qty,buyAmt:Math.round(r.total*100)/100,buyCur:d.buyCur,buyDate:d.buyDate,sales:old?(old.sales||[]):[],date:d.buyDate,ts:old?old.ts:Date.now()};
+    var was=d.edit;saveTx(tr);tdraft=null;
+    if(was){openDetail(tr.id);toast("Updated")}else{openDetail(tr.id);toast("Saved. Tap Record a sale when you sell.")}
+    return;
+  }
+  if(e.target.id==="saleForm"&&sdraft){
+    syncSale();var sd=sdraft,er2=$("#fErr"),c=sCalc();
+    if(!c){er2.textContent="Enter how many you sold and the price.";return}
+    var t=c.t,own=sd.edit?((t.sales||[]).find(function(x){return x.id===sd.id})||{qty:0}).qty:0;
+    if(c.qty>leftQty(t)+own+1e-9){er2.textContent="Only "+qtyStr(leftQty(t)+own)+" left in stock.";return}
+    if(sd.date<t.buyDate){er2.textContent="The sale date is before the purchase date.";return}
+    var sale={id:sd.id||newId(),qty:c.qty,amt:Math.round(c.total*100)/100,cur:sd.cur,date:sd.date};
+    var sales=(t.sales||[]).filter(function(x){return x.id!==sale.id});sales.push(sale);
+    var nt2=Object.assign({},t,{sales:sales});
+    sdraft=null;saveTx(nt2);openDetail(nt2.id);toast(sd.edit?"Sale updated":"Sale saved");return;
   }
   if(e.target.id==="rateForm"){
     var rv=parseNum($("#fRate").value);
@@ -686,8 +822,11 @@ document.addEventListener("change",function(e){
         if(!t||!t.id)return;
         var c;
         if(t.kind==="trade"){
+          normTrade(t);
           if(!t.name||!t.buyDate||!isFinite(t.buyAmt)||(t.buyCur!=="USD"&&t.buyCur!=="LBP"))return;
-          c={id:String(t.id),kind:"trade",name:String(t.name).slice(0,120),buyAmt:+t.buyAmt,buyCur:t.buyCur,buyDate:t.buyDate,sellAmt:+t.sellAmt||0,sellCur:t.sellCur==="LBP"?"LBP":"USD",sellDate:t.sellDate||"",date:t.buyDate,ts:t.ts||Date.now()};
+          c={id:String(t.id),kind:"trade",name:String(t.name).slice(0,120),qty:+t.qty||1,buyAmt:+t.buyAmt,buyCur:t.buyCur,buyDate:t.buyDate,
+             sales:(t.sales||[]).filter(function(x){return x&&x.id&&x.qty>0&&isFinite(x.amt)&&x.date&&(x.cur==="USD"||x.cur==="LBP")}).map(function(x){return {id:String(x.id),qty:+x.qty,amt:+x.amt,cur:x.cur,date:x.date}}),
+             date:t.buyDate,ts:t.ts||Date.now()};
         }else{
           if(!t.date||!isFinite(t.amount)||(t.kind!=="in"&&t.kind!=="out")||(t.cur!=="USD"&&t.cur!=="LBP"))return;
           c={id:String(t.id),kind:t.kind,cur:t.cur,amount:+t.amount,name:String(t.name||"").slice(0,120),date:t.date,ts:t.ts||Date.now()};
@@ -705,7 +844,7 @@ document.addEventListener("change",function(e){
 
 /* ---------- boot ---------- */
 try{localStorage.setItem("hesabati.test","1");localStorage.removeItem("hesabati.test");health.ls=true}catch(e){}
-txs=readLocal();render();
+txs=readLocal().map(normTrade);render();
 var tries=0;
 function rowBody(t){return bodyOf(t)}
 function retry(){if(++tries<4)setTimeout(connect,3000)}
@@ -731,7 +870,7 @@ function connect(){
             col.doc(t.id).set(rowBody(t)).catch(function(){health.db="writefail";render()});
           });
         }
-        txs=merged;health.db="ok";writeLocal();
+        txs=merged.map(normTrade);health.db="ok";writeLocal();
         if(!draft)render();
       },function(){health.db="err";render()});
     });
