@@ -114,6 +114,9 @@ h1,h2,h3{margin:0;font-weight:600;text-wrap:balance}
 .sheet h2{font-family:var(--f-display);font-size:20px}
 .field label{display:block;font-size:12.5px;color:var(--muted);font-weight:600;margin-bottom:5px}
 .field input{width:100%;background:var(--surface2);border:1.5px solid transparent;border-radius:12px;padding:12px 14px;font-size:16px;min-width:0}
+input[type=date]{display:block;width:100%;min-width:0;max-width:100%;min-height:48px;-webkit-appearance:none;appearance:none;text-align:start;line-height:1.2}
+input[type=date]::-webkit-date-and-time-value{text-align:start;min-width:0}
+.field{min-width:0}
 .field input:focus{border-color:var(--accent);outline:0}
 .field input.amount{font-family:var(--f-display);font-size:30px;font-weight:700;direction:ltr;text-align:left;padding:10px 14px}
 .hint{font-size:12.5px;color:var(--muted);margin-top:4px;min-height:18px}
