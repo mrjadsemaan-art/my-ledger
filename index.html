@@ -240,8 +240,13 @@ function parseNum(v){
 
 /* ---------- math ---------- */
 function totals(list,cur){
-  var i=0,o=0;list.forEach(function(t){if(t.cur!==cur)return;if(t.kind==="in")i+=t.amount;else o+=t.amount});
-  return {in:i,out:o,net:i-o};
+  var i=0,o=0,x=0;
+  list.forEach(function(t){
+    if(t.cur!==cur)return;
+    if(t.xfer){x+=t.kind==="in"?t.amount:-t.amount;return}
+    if(t.kind==="in")i+=t.amount;else o+=t.amount;
+  });
+  return {in:i,out:o,net:i-o,bal:i-o+x};
 }
 function byDate(a,b){return a.date<b.date?1:a.date>b.date?-1:(b.ts||0)-(a.ts||0)}
 function isTrade(t){return t.kind==="trade"}
@@ -262,6 +267,11 @@ function leftQty(t){var l=Math.round((t.qty-soldQty(t))*1e6)/1e6;return l<0?0:l}
 function flows(){
   var out=[];
   txs.forEach(function(t){
+    if(t.kind==="xchg"){
+      out.push({id:"xo:"+t.id,xid:t.id,kind:"out",cur:t.from,amount:t.fromAmt,name:"Exchange",date:t.date,ts:t.ts,xfer:true});
+      out.push({id:"xi:"+t.id,xid:t.id,kind:"in",cur:t.to,amount:t.toAmt,name:"Exchange",date:t.date,ts:t.ts,xfer:true});
+      return;
+    }
     if(!isTrade(t)){out.push(t);return}
     out.push({id:"tb:"+t.id,kind:"out",cur:t.buyCur,amount:t.buyAmt,name:"Bought: "+t.name,date:t.buyDate,ts:t.ts});
     (t.sales||[]).forEach(function(s){out.push({id:"ts:"+t.id+":"+s.id,kind:"in",cur:s.cur,amount:s.amt,name:"Sold: "+t.name,date:s.date,ts:t.ts})});
@@ -282,11 +292,12 @@ function itemProfit(t){
   qs.forEach(function(q){p+=toUsd(q.cur,q.p);b+=toUsd(q.cur,q.base)});
   return {cur:"USD",p:p,mixed:true,pct:b>0?p/b*100:0};
 }
+function showRows(list){return list.filter(function(t){return !(t.xfer&&t.kind==="in")})}
 function upTo(date){return flows().filter(function(t){return t.date<=date})}
 function monthTxs(m){return flows().filter(function(t){return t.date.slice(0,7)===m})}
 function groupNames(list,cur,kind){
   var map={};
-  list.forEach(function(t){if(t.cur!==cur||t.kind!==kind)return;var k=t.name.trim().toLowerCase();
+  list.forEach(function(t){if(t.cur!==cur||t.kind!==kind||t.xfer)return;var k=t.name.trim().toLowerCase();
     (map[k]=map[k]||{name:t.name.trim(),sum:0,n:0});map[k].sum+=t.amount;map[k].n++});
   return Object.keys(map).map(function(k){return map[k]}).sort(function(a,b){return b.sum-a.sum});
 }
@@ -296,6 +307,7 @@ function icon(dir){
   return dir==="r"?'<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>':'<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>';
 }
 function txRow(t){
+  if(t.xfer)return exchangeRow(t);
   var c=CUR[t.cur];
   return '<button class="row" data-edit="'+esc(t.id)+'"><span class="badge '+c.cls+'">'+c.short+'</span>'+
     '<span class="mid"><div class="nm">'+esc(t.name)+'</div><div class="mt">'+(t.kind==="in"?"Income":"Expense")+" · "+relDay(t.date)+'</div></span>'+
@@ -314,15 +326,15 @@ function viewHome(){
   CURS.forEach(function(cur){
     var all=totals(flows(),cur),mm=totals(mt,cur);
     h+='<section class="card '+CUR[cur].cls+'"><div class="cap">Balance · '+CUR[cur].label+'</div>'+
-      '<div class="big">'+money(cur,all.net)+'</div>'+(cur==="LBP"?'<div class="eqc">≈ '+eqUsd(all.net)+' at $1 = '+numStr("LBP",rate)+' LBP</div>':"")+
+      '<div class="big">'+money(cur,all.bal)+'</div>'+(cur==="LBP"?'<div class="eqc">≈ '+eqUsd(all.bal)+' at $1 = '+numStr("LBP",rate)+' LBP</div>':"")+
       '<div class="sub"><div>Income · '+MONTHS[now.getMonth()]+'<b>'+money(cur,mm.in)+'</b></div><div>Expenses · '+MONTHS[now.getMonth()]+'<b>'+money(cur,mm.out)+'</b></div></div></section>';
   });
   h+='<section class="panel"><h3>Today<small>'+dayLabel(todayStr())+'</small></h3><div class="cols">'+miniBlock("USD",td)+miniBlock("LBP",td)+'</div></section>';
-  var totUsd=totals(flows(),"USD").net+totals(flows(),"LBP").net/rate;
+  var totUsd=totals(flows(),"USD").bal+totals(flows(),"LBP").bal/rate;
   h+='<section class="panel"><h3>Exchange rate<button class="link" id="rateEdit">Change</button></h3><div class="r" style="display:flex;justify-content:space-between;gap:8px"><span>$1 =</span><b>'+'<span class="num">'+numStr("LBP",rate)+'</span><span class="unit">LBP</span></b></div>'+
     '<div class="r" style="display:flex;justify-content:space-between;gap:8px;margin-top:6px"><span>Total balance in USD</span><b>'+money("USD",totUsd)+'</b></div>'+
-    '<div class="mt" style="color:var(--muted);font-size:12.5px;margin-top:8px">LBP amounts show their dollar value at this rate.</div></section>';
-  var recent=flows().slice().sort(byDate).slice(0,6);
+    '<div class="mt" style="color:var(--muted);font-size:12.5px;margin-top:8px">LBP amounts show their dollar value at this rate.</div><button class="btn ghost" id="openX" style="margin-top:12px">Exchange $ ⇄ LBP</button></section>';
+  var recent=showRows(flows()).sort(byDate).slice(0,6);
   h+='<section class="panel"><h3>Recent activity<button class="link" data-go="log">See all</button></h3>';
   if(!recent.length)h+='<div class="empty">No transactions yet.<br>Tap + to add your first income or expense.</div>';
   else h+='<div class="list">'+recent.map(txRow).join("")+'</div>';
@@ -331,7 +343,9 @@ function viewHome(){
 }
 
 function viewLog(){
-  var list=flows().filter(function(t){return (ui.logCur==="ALL"||t.cur===ui.logCur)&&(ui.logKind==="ALL"||t.kind===ui.logKind)}).sort(byDate);
+  var list=flows().filter(function(t){
+    if(t.xfer){if(ui.logKind!=="ALL")return false;var e=getX(t.xid);return ui.logCur==="ALL"||(e&&(e.from===ui.logCur||e.to===ui.logCur))}
+    return (ui.logCur==="ALL"||t.cur===ui.logCur)&&(ui.logKind==="ALL"||t.kind===ui.logKind)}).sort(byDate);
   var h='<div class="top"><h1 class="brand">History</h1></div><div class="stack">';
   h+='<div class="seg" role="group" aria-label="Currency">'+[["ALL","All"],["USD","USD $"],["LBP","LBP"]].map(function(x){return '<button data-logcur="'+x[0]+'" aria-pressed="'+(ui.logCur===x[0])+'">'+x[1]+'</button>'}).join("")+'</div>';
   h+='<div class="seg" role="group" aria-label="Type">'+[["ALL","All"],["in","Income"],["out","Expense"]].map(function(x){return '<button data-logkind="'+x[0]+'" aria-pressed="'+(ui.logKind===x[0])+'">'+x[1]+'</button>'}).join("")+'</div></div>';
@@ -339,8 +353,8 @@ function viewLog(){
   var cur=null,html="",bucket=[];
   function flush(){
     if(cur===null)return;
-    var tt=CURS.filter(function(c){return (ui.logCur==="ALL"||ui.logCur===c)&&bucket.some(function(t){return t.cur===c})}).map(function(c){var n=totals(bucket,c).net;return '<span class="'+(n>=0?"in":"out")+'">'+money(c,n,true)+'</span>'}).join("");
-    html+='<div class="dayhead"><span>'+relDay(cur)+(cur!==todayStr()?"":" · "+dayLabel(cur))+'</span><span class="tot">'+tt+'</span></div><div class="panel"><div class="list">'+bucket.map(txRow).join("")+'</div></div>';
+    var tt=CURS.filter(function(c){return (ui.logCur==="ALL"||ui.logCur===c)&&bucket.some(function(t){return t.cur===c&&!t.xfer})}).map(function(c){var n=totals(bucket,c).net;return '<span class="'+(n>=0?"in":"out")+'">'+money(c,n,true)+'</span>'}).join("");
+    html+='<div class="dayhead"><span>'+relDay(cur)+(cur!==todayStr()?"":" · "+dayLabel(cur))+'</span><span class="tot">'+tt+'</span></div><div class="panel"><div class="list">'+showRows(bucket).map(txRow).join("")+'</div></div>';
   }
   list.forEach(function(t){if(t.date!==cur){flush();cur=t.date;bucket=[]}bucket.push(t)});
   flush();
@@ -350,7 +364,7 @@ function viewLog(){
 function chartSVG(m,cur){
   var p=m.split("-"),ndays=new Date(+p[0],+p[1],0).getDate(),inn=[],out=[],i;
   for(i=0;i<ndays;i++){inn.push(0);out.push(0)}
-  monthTxs(m).forEach(function(t){if(t.cur!==cur)return;var d=+t.date.slice(8)-1;if(t.kind==="in")inn[d]+=t.amount;else out[d]+=t.amount});
+  monthTxs(m).forEach(function(t){if(t.cur!==cur||t.xfer)return;var d=+t.date.slice(8)-1;if(t.kind==="in")inn[d]+=t.amount;else out[d]+=t.amount});
   var max=Math.max.apply(null,inn.concat(out));
   if(max<=0)return '<div class="empty">No transactions in this currency this month.</div>';
   var W=320,H=110,L=0,R=40,T=8,B=16,pw=W-L-R,ph=H-T-B,step=pw/ndays,bw=Math.max(1.6,step*0.36),s="";
@@ -385,21 +399,21 @@ function viewReport(){
     var d=ui.repDay,list=flows().filter(function(t){return t.date===d}),cum=upTo(d);
     h+='<div class="nav"><button class="ic" data-step="-1" aria-label="Previous day">'+icon("l")+'</button><div class="ttl">'+dayLabelFull(d)+(d===todayStr()?'<div class="dateline">Today</div>':"")+'</div><button class="ic" data-step="1" aria-label="Next day">'+icon("r")+'</button></div>';
     CURS.forEach(function(cur){
-      var tt=totals(list,cur),bal=totals(cum,cur).net;
+      var tt=totals(list,cur),bal=totals(cum,cur).bal;
       h+='<section class="panel"><div class="cur-title"><span class="badge '+CUR[cur].cls+'">'+CUR[cur].short+'</span>'+CUR[cur].label+'</div><div class="kv">'+
         '<div class="mini"><div class="t">Income</div><div class="v in">'+mv(cur,tt.in)+'</div></div>'+
         '<div class="mini"><div class="t">Expense</div><div class="v out">'+mv(cur,tt.out)+'</div></div>'+
         '<div class="mini"><div class="t">Net today</div><div class="v '+(tt.net>=0?"in":"out")+'">'+mv(cur,tt.net,true)+'</div></div>'+
         '<div class="mini"><div class="t">Balance at end of day</div><div class="v">'+mv(cur,bal)+'</div></div></div></section>';
     });
-    h+='<section class="panel"><h3>Transactions today<small>'+list.length+'</small></h3>'+(list.length?'<div class="list">'+list.slice().sort(byDate).map(txRow).join("")+'</div>':'<div class="empty">No transactions on this day.</div>')+'</section>';
+    h+='<section class="panel"><h3>Transactions today<small>'+showRows(list).length+'</small></h3>'+(list.length?'<div class="list">'+showRows(list).sort(byDate).map(txRow).join("")+'</div>':'<div class="empty">No transactions on this day.</div>')+'</section>';
     h+='<button class="btn ghost" data-jump="today">Go to today</button>';
   }else{
     var m=ui.repMonth,ml=monthTxs(m),p=m.split("-"),last=p[0]+"-"+p[1]+"-"+pad(new Date(+p[0],+p[1],0).getDate());
     var isCur=m===todayStr().slice(0,7),daysPassed=isCur?new Date().getDate():new Date(+p[0],+p[1],0).getDate();
     h+='<div class="nav"><button class="ic" data-step="-1" aria-label="Previous month">'+icon("l")+'</button><div class="ttl">'+monthLabel(m)+'</div><button class="ic" data-step="1" aria-label="Next month">'+icon("r")+'</button></div>';
     CURS.forEach(function(cur){
-      var tt=totals(ml,cur),bal=totals(upTo(last),cur).net;
+      var tt=totals(ml,cur),bal=totals(upTo(last),cur).bal;
       h+='<section class="panel"><div class="cur-title"><span class="badge '+CUR[cur].cls+'">'+CUR[cur].short+'</span>'+CUR[cur].label+'</div><div class="kv">'+
         '<div class="mini"><div class="t">Income this month</div><div class="v in">'+mv(cur,tt.in)+'</div></div>'+
         '<div class="mini"><div class="t">Expenses this month</div><div class="v out">'+mv(cur,tt.out)+'</div></div>'+
@@ -491,10 +505,10 @@ function openSheet(t){
   drawSheet();
   setTimeout(function(){var a=$("#fAmount");if(a&&!draft.edit)a.focus()},60);
 }
-function closeSheet(){$("#sheetHost").innerHTML="";draft=null;tdraft=null;sdraft=null;detailId=null}
+function closeSheet(){$("#sheetHost").innerHTML="";draft=null;tdraft=null;sdraft=null;detailId=null;xdraft=null}
 function recentNames(kind){
   var seen={},out=[];
-  txs.filter(function(t){return !isTrade(t)}).slice().sort(byDate).forEach(function(t){if(t.kind!==kind)return;var k=t.name.trim().toLowerCase();if(seen[k])return;seen[k]=1;out.push(t.name.trim())});
+  txs.filter(function(t){return t.kind==="in"||t.kind==="out"}).slice().sort(byDate).forEach(function(t){if(t.kind!==kind)return;var k=t.name.trim().toLowerCase();if(seen[k])return;seen[k]=1;out.push(t.name.trim())});
   return out.slice(0,8);
 }
 function hintText(){
@@ -505,7 +519,7 @@ function drawSheet(){
   var d=draft,names=recentNames(d.kind);
   $("#sheetHost").innerHTML='<div class="scrim" id="scrim"><form class="sheet" id="sheetForm" role="dialog" aria-modal="true" aria-label="Transaction">'+
     '<h2>'+(d.edit?"Edit transaction":"New transaction")+'</h2>'+
-    '<div class="seg kind" role="group" aria-label="Type"><button type="button" data-k="out" aria-pressed="'+(d.kind==="out")+'">Expense</button><button type="button" data-k="in" aria-pressed="'+(d.kind==="in")+'">Income</button><button type="button" data-k="trade" aria-pressed="false">Item</button></div>'+
+    '<div class="seg kind" role="group" aria-label="Type"><button type="button" data-k="out" aria-pressed="'+(d.kind==="out")+'">Expense</button><button type="button" data-k="in" aria-pressed="'+(d.kind==="in")+'">Income</button><button type="button" data-k="trade" aria-pressed="false">Item</button><button type="button" data-k="xchg" aria-pressed="false">Exchange</button></div>'+
     '<div class="seg" role="group" aria-label="Currency"><button type="button" data-c="USD" aria-pressed="'+(d.cur==="USD")+'">US Dollar $</button><button type="button" data-c="LBP" aria-pressed="'+(d.cur==="LBP")+'">Lebanese Pound</button></div>'+
     '<div class="field"><label for="fAmount">Amount</label><input class="amount" id="fAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.amount)+'"><div class="hint" id="fHint">'+hintText()+'</div></div>'+
     '<div class="field"><label for="fName">What is it for?</label><input id="fName" autocomplete="off" placeholder="'+(d.kind==="in"?"e.g. Website project payment":"e.g. Fuel, lunch, subscription")+'" value="'+esc(d.name)+'">'+
@@ -641,6 +655,55 @@ function syncSale(){
   if((v=g("#sDate"))&&v)sdraft.date=v;
 }
 
+/* ---------- currency exchange ---------- */
+var xdraft=null;
+function getX(id){return txs.find(function(x){return x.id===id&&x.kind==="xchg"})}
+function xRound(cur,n){return cur==="USD"?Math.round(n*100)/100:Math.round(n)}
+function xConv(from,amt,rt){return from==="USD"?xRound("LBP",amt*rt):xRound("USD",amt/rt)}
+function exchangeRow(t){
+  var e=getX(t.xid);if(!e)return"";
+  return '<button class="row" data-edit="'+esc(t.id)+'"><span class="badge">⇄</span>'+
+    '<span class="mid"><div class="nm">Exchange '+e.from+' → '+e.to+'</div><div class="mt">at '+numStr("LBP",e.rate)+' · '+relDay(e.date)+'</div></span>'+
+    '<span class="amt" style="text-align:end"><span class="out">'+money(e.from,-e.fromAmt)+'</span><span class="eq in" style="font-size:13px">'+money(e.to,e.toAmt,true)+'</span></span></button>';
+}
+function openExchange(id,dir){
+  var e=id?getX(id):null;draft=null;tdraft=null;sdraft=null;detailId=null;
+  xdraft=e?{id:e.id,from:e.from,amt:String(e.fromAmt),rate:String(e.rate),date:e.date,edit:true,confirm:false}:
+    {id:null,from:dir||"USD",amt:"",rate:String(rate),date:todayStr(),edit:false,confirm:false};
+  drawExchange();
+  setTimeout(function(){var a=$("#xAmt");if(a&&!xdraft.edit)a.focus()},60);
+}
+function xCalc(){
+  var a=parseNum(xdraft.amt),r=parseNum(xdraft.rate);
+  if(isNaN(a)||a<=0||isNaN(r)||r<=0)return null;
+  return {amt:a,rate:r,got:xConv(xdraft.from,a,r)};
+}
+function xHint(){
+  var c=xCalc();if(!c)return"";
+  var to=xdraft.from==="USD"?"LBP":"USD";
+  return 'You get '+money(to,c.got);
+}
+function drawExchange(){
+  var d=xdraft,to=d.from==="USD"?"LBP":"USD";
+  putSheet('<form class="sheet" id="xForm" role="dialog" aria-modal="true" aria-label="Exchange">'+
+    '<h2>'+(d.edit?"Edit exchange":"Exchange money")+'</h2>'+
+    '<div class="seg" role="group" aria-label="Direction"><button type="button" data-xd="USD" aria-pressed="'+(d.from==="USD")+'">$ → LBP</button><button type="button" data-xd="LBP" aria-pressed="'+(d.from==="LBP")+'">LBP → $</button></div>'+
+    '<div class="field"><label for="xAmt">Amount you give ('+(d.from==="USD"?"USD":"LBP")+')</label><input class="amount" id="xAmt" inputmode="decimal" autocomplete="off" placeholder="0" value="'+esc(d.amt)+'"></div>'+
+    '<div class="grid2"><div class="field"><label for="xRate">Rate (LBP per $1)</label><input id="xRate" inputmode="decimal" autocomplete="off" value="'+esc(d.rate)+'"></div><div class="field"><label for="xDate">Date</label><input id="xDate" type="date" value="'+d.date+'"></div></div>'+
+    '<div class="hint pf" id="xHint">'+xHint()+'</div>'+
+    '<div class="hint">It moves money between your dollar and lira balances. It does not count as income or expense.</div>'+
+    '<div id="fErr" class="hint out" role="alert"></div>'+
+    '<button class="btn" type="submit">'+(d.edit?"Save changes":"Exchange")+'</button>'+
+    (d.edit?(d.confirm?'<button type="button" class="btn danger" id="xDelYes">Sure? Tap again to delete</button>':'<button type="button" class="btn danger" id="xDelAsk">Delete exchange</button>'):"")+
+    '<button type="button" class="btn ghost" id="cancel">Cancel</button></form>');
+}
+function syncX(){
+  var g=function(i){var e=$(i);return e?e.value:null},v;
+  if((v=g("#xAmt"))!==null)xdraft.amt=v;
+  if((v=g("#xRate"))!==null)xdraft.rate=v;
+  if((v=g("#xDate"))&&v)xdraft.date=v;
+}
+
 /* ---------- data ops ---------- */
 function toast(msg){
   var h=$("#toastHost");h.innerHTML='<div class="toast" role="status">'+esc(msg)+'</div>';
@@ -667,7 +730,7 @@ function delTx(id){
 
 /* ---------- events ---------- */
 document.addEventListener("click",function(e){
-  var el=e.target.closest("[data-tab],[data-go],[data-logcur],[data-logkind],[data-rep],[data-step],[data-jump],[data-edit],[data-k],[data-c],[data-name],#fab,#cancel,#scrim,#delAsk,#delYes,#exportCsv,#backup,#restore,#rateEdit,[data-bc],[data-bm],[data-sc],[data-sm],[data-trade],[data-sale],[data-trfilter],#newItem,#tDelAsk,#tDelYes,#sDelAsk,#sDelYes,#tBack,#sBack,#addSale,#editBuy");
+  var el=e.target.closest("[data-tab],[data-go],[data-logcur],[data-logkind],[data-rep],[data-step],[data-jump],[data-edit],[data-k],[data-c],[data-name],#fab,#cancel,#scrim,#delAsk,#delYes,#exportCsv,#backup,#restore,#rateEdit,[data-bc],[data-bm],[data-sc],[data-sm],[data-trade],[data-sale],[data-trfilter],#newItem,#tDelAsk,#tDelYes,[data-xd],#xDelAsk,#xDelYes,#openX,#sDelAsk,#sDelYes,#tBack,#sBack,#addSale,#editBuy");
   if(!el)return;
   if(el.id==="scrim"){if(e.target===el)closeSheet();return}
   var ds=el.dataset;
@@ -677,6 +740,11 @@ document.addEventListener("click",function(e){
   if(el.id==="backup"){backup();return}
   if(el.id==="rateEdit"){openRate();return}
   if(el.id==="restore"){var rf=$("#restoreFile");if(rf)rf.click();return}
+  if(ds.k==="xchg"||el.id==="openX"){closeSheet();openExchange(null);return}
+  if(xdraft){
+    if(ds.xd||el.id==="xDelAsk"){syncX();if(ds.xd)xdraft.from=ds.xd;if(el.id==="xDelAsk")xdraft.confirm=true;drawExchange();return}
+    if(el.id==="xDelYes"){var xid=xdraft.id;closeSheet();delTx(xid);toast("Deleted");return}
+  }
   if(ds.k==="trade"){closeSheet();openTrade(null);return}
   if(el.id==="newItem"){openTrade(null);return}
   if(ds.trade){openDetail(ds.trade);return}
@@ -739,17 +807,26 @@ document.addEventListener("click",function(e){
     render();return;
   }
   if(ds.edit){
+    if(/^x[oi]:/.test(ds.edit)){openExchange(ds.edit.slice(3));return}
     if(/^t[bs]:/.test(ds.edit)){openDetail(ds.edit.split(":")[1]);return}
     var t=txs.find(function(x){return x.id===ds.edit});if(t)openSheet(t)
   }
 });
 document.addEventListener("input",function(e){
+  if(xdraft&&/^x(Amt|Rate|Date)$/.test(e.target.id)){syncX();var xh=$("#xHint");if(xh)xh.innerHTML=xHint();return}
   if(tdraft&&/^t(Name|Qty|Buy|BuyDate)$/.test(e.target.id)){syncTrade();var th=$("#tHint");if(th)th.innerHTML=tHint();return}
   if(sdraft&&/^s(Qty|Price|Date)$/.test(e.target.id)){syncSale();var sh=$("#sHint");if(sh)sh.innerHTML=sHint();return}
   if(e.target.id==="fAmount"&&draft){draft.amount=e.target.value;$("#fHint").textContent=hintText()}
 });
 document.addEventListener("submit",function(e){
   e.preventDefault();
+  if(e.target.id==="xForm"&&xdraft){
+    syncX();var xc=xCalc(),xe=$("#fErr");
+    if(!xc||!(xc.got>0)){xe.textContent="Enter the amount and the rate as numbers.";return}
+    var xf=xdraft.from,xt=xf==="USD"?"LBP":"USD",xo=xdraft.id?getX(xdraft.id):null;
+    var ex={id:xdraft.id||newId(),kind:"xchg",from:xf,to:xt,fromAmt:xRound(xf,xc.amt),toAmt:xc.got,rate:xc.rate,date:xdraft.date,ts:xo?xo.ts:Date.now()};
+    var xwas=xdraft.edit;closeSheet();saveTx(ex);toast(xwas?"Updated":"Exchanged");return;
+  }
   if(e.target.id==="tradeForm"&&tdraft){
     syncTrade();var d=tdraft,er=$("#fErr"),r=tTotal(d);
     if(!d.name.trim()){er.textContent="Enter the item name.";return}
@@ -793,7 +870,7 @@ document.addEventListener("submit",function(e){
 /* ---------- export ---------- */
 function exportCsv(){
   var m=ui.repMonth,rows=[["Date","Type","Currency","Amount","Name"]];
-  monthTxs(m).slice().sort(function(a,b){return a.date<b.date?-1:1}).forEach(function(t){rows.push([t.date,t.kind==="in"?"Income":"Expense",t.cur,t.amount,t.name])});
+  monthTxs(m).slice().sort(function(a,b){return a.date<b.date?-1:1}).forEach(function(t){rows.push([t.date,t.xfer?(t.kind==="in"?"Exchange in":"Exchange out"):(t.kind==="in"?"Income":"Expense"),t.cur,t.amount,t.name])});
   CURS.forEach(function(c){var tt=totals(monthTxs(m),c);rows.push([]);rows.push(["Total "+c,"Income",c,tt.in,""]);rows.push(["","Expense",c,tt.out,""]);rows.push(["","Net",c,tt.net,""])});
   var csv="﻿"+rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"'}).join(",")}).join("\n");
   if(!window.claude||!window.claude.use){toast("Downloads are not available here");return}
@@ -827,6 +904,9 @@ document.addEventListener("change",function(e){
           c={id:String(t.id),kind:"trade",name:String(t.name).slice(0,120),qty:+t.qty||1,buyAmt:+t.buyAmt,buyCur:t.buyCur,buyDate:t.buyDate,
              sales:(t.sales||[]).filter(function(x){return x&&x.id&&x.qty>0&&isFinite(x.amt)&&x.date&&(x.cur==="USD"||x.cur==="LBP")}).map(function(x){return {id:String(x.id),qty:+x.qty,amt:+x.amt,cur:x.cur,date:x.date}}),
              date:t.buyDate,ts:t.ts||Date.now()};
+        }else if(t.kind==="xchg"){
+          if(!t.date||!isFinite(t.fromAmt)||!isFinite(t.toAmt)||!isFinite(t.rate)||(t.from!=="USD"&&t.from!=="LBP")||(t.to!=="USD"&&t.to!=="LBP"))return;
+          c={id:String(t.id),kind:"xchg",from:t.from,to:t.to,fromAmt:+t.fromAmt,toAmt:+t.toAmt,rate:+t.rate,date:t.date,ts:t.ts||Date.now()};
         }else{
           if(!t.date||!isFinite(t.amount)||(t.kind!=="in"&&t.kind!=="out")||(t.cur!=="USD"&&t.cur!=="LBP"))return;
           c={id:String(t.id),kind:t.kind,cur:t.cur,amount:+t.amount,name:String(t.name||"").slice(0,120),date:t.date,ts:t.ts||Date.now()};
